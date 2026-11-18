@@ -1,0 +1,65 @@
+name: CI/CD - donation-service
+
+# Monorepo: cada serviço tem o próprio pipeline, disparado só quando a pasta dele muda.
+# Os passos (lint, testes, SAST, SCA, build, scan da imagem e GitOps) vêm dos
+# reusable workflows da Fase 3 (só ganharam suporte a monorepo via working-directory).
+on:
+  pull_request:
+    branches: [main]
+    paths: ['donation-service/**', '.github/workflows/donation-service.yml']
+  push:
+    branches: [main]
+    paths: ['donation-service/**', '.github/workflows/donation-service.yml']
+  # Rebuild manual (a cada conta nova do AWS Academy o ECR nasce vazio):
+  #   gh workflow run donation-service.yml -R leonardopetruncko/solidarytech-app
+  workflow_dispatch:
+
+concurrency:
+  group: donation-service-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Build & Unit Test + Lint
+    uses: leonardopetruncko/reusable-workflows/.github/workflows/go-quality.yml@main
+    with:
+      working-directory: 'donation-service'
+      go-version: '1.26'
+
+  security:
+    name: DevSecOps - SAST & SCA
+    needs: quality
+    uses: leonardopetruncko/reusable-workflows/.github/workflows/security-go.yml@main
+    with:
+      working-directory: 'donation-service'
+      go-version: '1.26'
+      trivy-severity: 'CRITICAL'
+
+  docker:
+    name: Docker Build, Scan & Push
+    needs: security
+    if: github.event_name != 'pull_request'
+    uses: leonardopetruncko/reusable-workflows/.github/workflows/docker-build-push.yml@main
+    with:
+      dockerfile-path: 'donation-service/Dockerfile'
+      build-context: 'donation-service'
+      image-name: 'donation-service'
+      push-image: true
+      trivy-severity: 'CRITICAL'
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+  update-gitops:
+    name: Atualiza tag no repo GitOps
+    needs: docker
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    uses: leonardopetruncko/reusable-workflows/.github/workflows/update-gitops.yml@main
+    with:
+      gitops-repo: 'leonardopetruncko/solidarytech-gitops'
+      service-name: 'donation-service'
+      image-uri: ${{ needs.docker.outputs.image-uri }}
+      manifest-path: 'apps/donation-service/deployment.yaml'
+    secrets:
+      GITOPS_PUSH_TOKEN: ${{ secrets.GITOPS_PUSH_TOKEN }}
